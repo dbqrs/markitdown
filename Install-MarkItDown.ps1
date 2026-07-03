@@ -2,6 +2,7 @@
 # Installs Microsoft MarkItDown for Windows using a dedicated Python virtual environment.
 # Uses Python 3.10 through 3.13 only.
 # Avoids Python 3.14 due to current dependency problems.
+# Installs the Microsoft Visual C++ runtime before Python setup for native Python wheels.
 # Optionally installs FFmpeg to avoid pydub audio/video warnings.
 
 [CmdletBinding()]
@@ -200,6 +201,120 @@ function Install-Python312 {
     return Get-GoodPython
 }
 
+function Test-OnnxRuntimeImport {
+    param([string]$PythonExe)
+
+    try {
+        & $PythonExe -c "import onnxruntime" *> $null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-VcRuntimeInstalled {
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    )
+
+    foreach ($path in $registryPaths) {
+        try {
+            $runtime = Get-ItemProperty -Path $path -ErrorAction Stop
+
+            if ($runtime.Installed -eq 1) {
+                return $true
+            }
+        }
+        catch {
+            # Keep checking other runtime indicators.
+        }
+    }
+
+    $system32 = Join-Path $env:WINDIR "System32"
+    $requiredDlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+
+    foreach ($dll in $requiredDlls) {
+        if (-not (Test-Path (Join-Path $system32 $dll))) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Install-VcRuntime {
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+
+    if (-not $winget) {
+        throw "winget is not available to install the Microsoft Visual C++ runtime. Install the Microsoft Visual C++ Redistributable 2015-2022 x64 manually, then rerun this script."
+    }
+
+    Write-Section "Installing Microsoft Visual C++ runtime prerequisite"
+
+    Invoke-ExternalCommand `
+        -FilePath "winget.exe" `
+        -Arguments @(
+            "install",
+            "--exact",
+            "--id", "Microsoft.VCRedist.2015+.x64",
+            "--source", "winget",
+            "--accept-package-agreements",
+            "--accept-source-agreements"
+        ) `
+        -FailureMessage "winget failed to install the Microsoft Visual C++ runtime." | Out-Null
+}
+
+function Ensure-VcRuntime {
+    Write-Section "Checking Microsoft Visual C++ runtime"
+
+    if (Test-VcRuntimeInstalled) {
+        Write-Host "Microsoft Visual C++ runtime already appears to be installed." -ForegroundColor Green
+        return
+    }
+
+    Install-VcRuntime
+
+    if (Test-VcRuntimeInstalled) {
+        Write-Host "Microsoft Visual C++ runtime is installed." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Microsoft Visual C++ runtime install completed, but it was not detected yet. Continuing; the native Python dependency check will verify it." -ForegroundColor Yellow
+    }
+}
+
+function Ensure-OnnxRuntimeWorks {
+    param([string]$PythonExe)
+
+    if (Test-OnnxRuntimeImport -PythonExe $PythonExe) {
+        Write-Host "onnxruntime native dependency check passed." -ForegroundColor Green
+        return
+    }
+
+    Write-Host "onnxruntime could not load. Rechecking the Microsoft Visual C++ runtime, then retrying." -ForegroundColor Yellow
+
+    Ensure-VcRuntime
+
+    if (Test-OnnxRuntimeImport -PythonExe $PythonExe) {
+        Write-Host "onnxruntime imports successfully." -ForegroundColor Green
+        return
+    }
+
+    Write-Section "Repairing onnxruntime package"
+
+    Invoke-ExternalCommand `
+        -FilePath $PythonExe `
+        -Arguments @("-m", "pip", "install", "--upgrade", "--force-reinstall", "onnxruntime", "--no-cache-dir") `
+        -FailureMessage "onnxruntime repair install failed." | Out-Null
+
+    if (-not (Test-OnnxRuntimeImport -PythonExe $PythonExe)) {
+        throw "onnxruntime still cannot load. Install or repair the Microsoft Visual C++ Redistributable 2015-2022 x64, then rerun this script."
+    }
+
+    Write-Host "onnxruntime imports successfully." -ForegroundColor Green
+}
+
 function Test-FFmpeg {
     $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
 
@@ -298,6 +413,8 @@ function Add-ToUserPath {
 
 Write-Section "Starting MarkItDown install"
 
+Ensure-VcRuntime
+
 $PythonExe = Get-GoodPython
 
 if (-not $PythonExe) {
@@ -322,7 +439,7 @@ if (-not (Test-Path $VenvPython)) {
     Invoke-ExternalCommand `
         -FilePath $PythonExe `
         -Arguments @("-m", "venv", $VenvDir) `
-        -FailureMessage "Failed to create Python virtual environment."
+        -FailureMessage "Failed to create Python virtual environment." | Out-Null
 }
 else {
     Write-Host "Virtual environment already exists: $VenvDir"
@@ -333,7 +450,7 @@ Write-Section "Upgrading pip tools"
 Invoke-ExternalCommand `
     -FilePath $VenvPython `
     -Arguments @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "--no-cache-dir") `
-    -FailureMessage "pip tool upgrade failed."
+    -FailureMessage "pip tool upgrade failed." | Out-Null
 
 Write-Section "Clearing pip cache"
 
@@ -348,11 +465,15 @@ Write-Section "Installing MarkItDown"
 Invoke-ExternalCommand `
     -FilePath $VenvPython `
     -Arguments @("-m", "pip", "install", "--upgrade", "markitdown[all]", "--no-cache-dir") `
-    -FailureMessage "MarkItDown pip install failed."
+    -FailureMessage "MarkItDown pip install failed." | Out-Null
 
 if (-not (Test-Path $VenvMarkItDown)) {
     throw "MarkItDown installed, but markitdown.exe was not found where expected: $VenvMarkItDown"
 }
+
+Write-Section "Checking native Python dependencies"
+
+Ensure-OnnxRuntimeWorks -PythonExe $VenvPython
 
 Write-Section "Installing optional FFmpeg dependency"
 
@@ -391,7 +512,7 @@ try {
     Invoke-ExternalCommand `
         -FilePath $CmdPath `
         -Arguments @($TestInput, "-o", $TestOutput) `
-        -FailureMessage "MarkItDown test conversion failed."
+        -FailureMessage "MarkItDown test conversion failed." | Out-Null
 }
 finally {
     $env:PYTHONWARNINGS = $oldPythonWarnings
@@ -419,5 +540,3 @@ Write-Host '  markitdown "C:\Path\To\File.docx" -o "C:\Path\To\File.md"'
 Write-Host '  markitdown "C:\Path\To\File.xlsx" -o "C:\Path\To\File.md"'
 Write-Host '  markitdown "C:\Path\To\File.pptx" -o "C:\Path\To\File.md"'
 Write-Host ""
-Write-Host "If the markitdown command is not found right away, close and reopen PowerShell."
-Write-Host "If FFmpeg was installed but not detected right away, close and reopen PowerShell."
