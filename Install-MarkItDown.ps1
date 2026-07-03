@@ -3,7 +3,6 @@
 # Uses Python 3.10 through 3.13 only.
 # Avoids Python 3.14 due to current dependency problems.
 # Optionally installs FFmpeg to avoid pydub audio/video warnings.
-# Adds a Windows right-click menu option named "MarkItDown" for converting files to Markdown.
 
 [CmdletBinding()]
 param(
@@ -192,7 +191,7 @@ function Install-Python312 {
             "--accept-package-agreements",
             "--accept-source-agreements"
         ) `
-        -FailureMessage "winget failed to install Python 3.12."
+        -FailureMessage "winget failed to install Python 3.12." | Out-Null
 
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -297,104 +296,6 @@ function Add-ToUserPath {
     }
 }
 
-function Install-MarkItDownContextMenu {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InstallRoot,
-
-        [Parameter(Mandatory = $true)]
-        [string]$CmdPath
-    )
-
-    Write-Section "Installing Windows right-click menu"
-
-    if (-not (Test-Path -LiteralPath $CmdPath -PathType Leaf)) {
-        throw "Cannot install right-click menu because the MarkItDown launcher was not found: $CmdPath"
-    }
-
-    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-
-    $ContextScriptPath = Join-Path $InstallRoot "Convert-With-MarkItDown.ps1"
-
-    $contextScriptContent = @'
-param(
-    [Parameter(Mandatory = $true)]
-    [string]$InputFile
-)
-
-$ErrorActionPreference = "Stop"
-
-try {
-    if (-not (Test-Path -LiteralPath $InputFile -PathType Leaf)) {
-        throw "Input file was not found: $InputFile"
-    }
-
-    $sourceItem = Get-Item -LiteralPath $InputFile
-    $markitdownCmd = Join-Path $PSScriptRoot "markitdown.cmd"
-
-    if (-not (Test-Path -LiteralPath $markitdownCmd -PathType Leaf)) {
-        throw "MarkItDown launcher was not found: $markitdownCmd"
-    }
-
-    $outputFile = Join-Path $sourceItem.DirectoryName ($sourceItem.BaseName + ".md")
-
-    if ($sourceItem.FullName -ieq $outputFile) {
-        $outputFile = Join-Path $sourceItem.DirectoryName ($sourceItem.BaseName + ".converted.md")
-    }
-
-    & $markitdownCmd $sourceItem.FullName -o $outputFile
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "MarkItDown failed with exit code $LASTEXITCODE."
-    }
-
-    if (-not (Test-Path -LiteralPath $outputFile -PathType Leaf)) {
-        throw "MarkItDown finished, but the output file was not created: $outputFile"
-    }
-
-    Add-Type -AssemblyName System.Windows.Forms
-
-    [System.Windows.Forms.MessageBox]::Show(
-        "Created:`r`n$outputFile",
-        "MarkItDown complete",
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Information
-    ) | Out-Null
-}
-catch {
-    Add-Type -AssemblyName System.Windows.Forms
-
-    [System.Windows.Forms.MessageBox]::Show(
-        $_.Exception.Message,
-        "MarkItDown failed",
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Error
-    ) | Out-Null
-
-    exit 1
-}
-'@
-
-    Set-Content -Path $ContextScriptPath -Value $contextScriptContent -Encoding UTF8
-
-    $ShellKey = "HKCU:\Software\Classes\*\shell\MarkItDown"
-    $CommandKey = "$ShellKey\command"
-
-    New-Item -Path $ShellKey -Force | Out-Null
-    New-Item -Path $CommandKey -Force | Out-Null
-
-    New-ItemProperty -Path $ShellKey -Name "MUIVerb" -Value "MarkItDown" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $ShellKey -Name "Icon" -Value "powershell.exe" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $ShellKey -Name "Position" -Value "Top" -PropertyType String -Force | Out-Null
-
-    $CommandValue = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ContextScriptPath`" `"%1`""
-
-    Set-Item -Path $CommandKey -Value $CommandValue
-
-    Write-Host "Right-click menu installed successfully." -ForegroundColor Green
-    Write-Host "Use: Right-click a file > Show more options > MarkItDown"
-}
-
 Write-Section "Starting MarkItDown install"
 
 $PythonExe = Get-GoodPython
@@ -470,8 +371,6 @@ endlocal
 
 Set-Content -Path $CmdPath -Value $cmdContent -Encoding ASCII
 
-Install-MarkItDownContextMenu -InstallRoot $InstallRoot -CmdPath $CmdPath
-
 if (-not $NoPathUpdate) {
     Write-Section "Updating user PATH"
     Add-ToUserPath -Folder $InstallRoot
@@ -511,12 +410,6 @@ Write-Host ""
 Write-Host "Command launcher:"
 Write-Host "  $CmdPath"
 Write-Host ""
-Write-Host "Right-click conversion script:"
-Write-Host "  $(Join-Path $InstallRoot "Convert-With-MarkItDown.ps1")"
-Write-Host ""
-Write-Host "Right-click menu:"
-Write-Host "  Right-click a file > Show more options > MarkItDown"
-Write-Host ""
 Write-Host "Test output:"
 Write-Host "  $TestOutput"
 Write-Host ""
@@ -526,4 +419,5 @@ Write-Host '  markitdown "C:\Path\To\File.docx" -o "C:\Path\To\File.md"'
 Write-Host '  markitdown "C:\Path\To\File.xlsx" -o "C:\Path\To\File.md"'
 Write-Host '  markitdown "C:\Path\To\File.pptx" -o "C:\Path\To\File.md"'
 Write-Host ""
-Write-Host "If the right-click option does not appear immediately, restart File Explorer or sign out and back in."
+Write-Host "If the markitdown command is not found right away, close and reopen PowerShell."
+Write-Host "If FFmpeg was installed but not detected right away, close and reopen PowerShell."
