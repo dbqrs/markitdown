@@ -10,6 +10,7 @@ param(
     [string]$InstallRoot = "$env:USERPROFILE\MarkItDown",
     [switch]$SkipPythonInstall,
     [switch]$NoPathUpdate,
+    [switch]$NoContextMenu,
     [switch]$SkipFFmpegInstall
 )
 
@@ -411,6 +412,123 @@ function Add-ToUserPath {
     }
 }
 
+function New-MarkItDownWrapper {
+    param([string]$WrapperPath)
+
+    $wrapperContent = @'
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$InputFile
+)
+
+$ErrorActionPreference = "Stop"
+
+try {
+    if (-not (Test-Path -LiteralPath $InputFile -PathType Leaf)) {
+        throw "Input file was not found: $InputFile"
+    }
+
+    $sourceItem = Get-Item -LiteralPath $InputFile
+    $markitdownExe = Join-Path $PSScriptRoot ".venv\Scripts\markitdown.exe"
+
+    if (-not (Test-Path -LiteralPath $markitdownExe -PathType Leaf)) {
+        throw "MarkItDown executable was not found: $markitdownExe"
+    }
+
+    $outputFile = Join-Path $sourceItem.DirectoryName ($sourceItem.BaseName + ".md")
+
+    if ($sourceItem.FullName -ieq $outputFile) {
+        $outputFile = Join-Path $sourceItem.DirectoryName ($sourceItem.BaseName + ".converted.md")
+    }
+
+    & $markitdownExe $sourceItem.FullName -o $outputFile
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "MarkItDown failed with exit code $LASTEXITCODE."
+    }
+
+    if (-not (Test-Path -LiteralPath $outputFile -PathType Leaf)) {
+        throw "MarkItDown finished, but the output file was not created: $outputFile"
+    }
+
+    Add-Type -AssemblyName System.Windows.Forms
+
+    [System.Windows.Forms.MessageBox]::Show(
+        "Created:`r`n$outputFile",
+        "MarkItDown complete",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+}
+catch {
+    Add-Type -AssemblyName System.Windows.Forms
+
+    [System.Windows.Forms.MessageBox]::Show(
+        $_.Exception.Message,
+        "MarkItDown failed",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    ) | Out-Null
+
+    exit 1
+}
+'@
+
+    Set-Content -Path $WrapperPath -Value $wrapperContent -Encoding UTF8
+    Write-Host "Created right-click wrapper: $WrapperPath" -ForegroundColor Green
+}
+
+function Register-MarkItDownContextMenu {
+    param(
+        [string]$WrapperPath,
+        [string]$IconPath
+    )
+
+    if (-not (Test-Path -LiteralPath $WrapperPath -PathType Leaf)) {
+        throw "Cannot register right-click menu because the wrapper was not found: $WrapperPath"
+    }
+
+    $powerShellPath = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+
+    if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
+        $powerShellPath = "powershell.exe"
+    }
+
+    $verb = "Convert with MarkItDown"
+    $shellKeyPath = "Software\Classes\*\shell\MarkItDown"
+    $commandKeyPath = "Software\Classes\*\shell\MarkItDown\command"
+    $command = '"{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}" -InputFile "%1"' -f $powerShellPath, $WrapperPath
+
+    $shellKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($shellKeyPath)
+
+    try {
+        $shellKey.SetValue("", $verb, [Microsoft.Win32.RegistryValueKind]::String)
+        $shellKey.SetValue("MUIVerb", $verb, [Microsoft.Win32.RegistryValueKind]::String)
+
+        if (Test-Path -LiteralPath $IconPath -PathType Leaf) {
+            $shellKey.SetValue("Icon", $IconPath, [Microsoft.Win32.RegistryValueKind]::String)
+        }
+    }
+    finally {
+        if ($shellKey) {
+            $shellKey.Close()
+        }
+    }
+
+    $commandKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($commandKeyPath)
+
+    try {
+        $commandKey.SetValue("", $command, [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    finally {
+        if ($commandKey) {
+            $commandKey.Close()
+        }
+    }
+
+    Write-Host "Registered right-click menu entry: $verb" -ForegroundColor Green
+}
+
 Write-Section "Starting MarkItDown install"
 
 Ensure-VcRuntime
@@ -482,6 +600,7 @@ Install-FFmpeg
 Write-Section "Creating command launcher"
 
 $CmdPath = Join-Path $InstallRoot "markitdown.cmd"
+$WrapperPath = Join-Path $InstallRoot "Convert-With-MarkItDown.ps1"
 
 $cmdContent = @"
 @echo off
@@ -491,6 +610,15 @@ endlocal
 "@
 
 Set-Content -Path $CmdPath -Value $cmdContent -Encoding ASCII
+
+Write-Section "Creating right-click wrapper"
+
+New-MarkItDownWrapper -WrapperPath $WrapperPath
+
+if (-not $NoContextMenu) {
+    Write-Section "Updating right-click menu"
+    Register-MarkItDownContextMenu -WrapperPath $WrapperPath -IconPath $VenvMarkItDown
+}
 
 if (-not $NoPathUpdate) {
     Write-Section "Updating user PATH"
@@ -531,6 +659,14 @@ Write-Host ""
 Write-Host "Command launcher:"
 Write-Host "  $CmdPath"
 Write-Host ""
+Write-Host "Right-click wrapper:"
+Write-Host "  $WrapperPath"
+Write-Host ""
+if (-not $NoContextMenu) {
+    Write-Host "Right-click menu:"
+    Write-Host "  Convert with MarkItDown"
+    Write-Host ""
+}
 Write-Host "Test output:"
 Write-Host "  $TestOutput"
 Write-Host ""
